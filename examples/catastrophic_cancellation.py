@@ -28,12 +28,19 @@ def stable(x):
 
 
 def surviving_digits(approx, exact):
+    if math.isnan(approx) or math.isnan(exact) or math.isinf(approx) or math.isinf(exact):
+        return 0.0
     if exact == 0.0:
         return 0.0
     rel = abs(approx - exact) / abs(exact)
     if rel == 0.0:
         return 16.0  # ~full float64
-    return max(0.0, -math.log10(rel))
+    # cap at float64's ~16 significant digits (a tiny rel could otherwise report
+    # hundreds), and guard the log against any non-positive domain error.
+    try:
+        return min(16.0, max(0.0, -math.log10(rel)))
+    except ValueError:
+        return 0.0
 
 
 def main():

@@ -27,7 +27,10 @@ float precisionBitsAt(float distance) {
 float ulp(float x) {
     x = abs(x);
     if (x == 0.0) return FP32_MIN_DENORMAL;
-    float e = floor(log2(x));
+    // Clamp the exponent at the denormal floor: below FP32_MIN_NORMAL the spacing
+    // stops shrinking and stays fixed at exp2(-149) = FP32_MIN_DENORMAL. Without
+    // this, exp2(e - 23) underflows to 0.0 for denormal inputs.
+    float e = max(-126.0, floor(log2(x)));
     return exp2(e - FP32_MANTISSA_BITS);
 }
 
@@ -38,7 +41,9 @@ float quantizeFloat(float x, float mantissaBits) {
     if (x == 0.0) return 0.0;
     float s = sign(x);
     x = abs(x);
-    float e = floor(log2(x));
+    // Same denormal-floor clamp as ulp(): below FP32_MIN_NORMAL an unclamped step
+    // underflows to 0.0, making x/step Infinity and the result NaN.
+    float e = max(-126.0, floor(log2(x)));
     float step = exp2(e - mantissaBits);
     // round-to-nearest, the IEEE default rounding mode
     return s * floor(x / step + 0.5) * step;
