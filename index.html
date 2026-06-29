@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>floating_point_dementia — viewer</title>
+<style>
+  :root { --bg:#07080c; --panel:#0e1018; --ink:#c8d0e0; --dim:#5a6478; --hot:#cc33ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  #wrap { display:flex; flex-direction:column; height:100%; }
+  header { display:flex; gap:14px; align-items:center; padding:10px 14px;
+    background:var(--panel); border-bottom:1px solid #1b1f2e; flex-wrap:wrap; }
+  header h1 { font-size:13px; margin:0; letter-spacing:.5px; color:var(--hot);
+    text-shadow:0 0 8px rgba(204,51,255,.4); }
+  select, button { background:#11131d; color:var(--ink); border:1px solid #262b3d;
+    border-radius:5px; padding:5px 9px; font:inherit; cursor:pointer; }
+  select:hover, button:hover { border-color:var(--hot); }
+  .spacer { flex:1; }
+  #meta { color:var(--dim); }
+  #stage { position:relative; flex:1; min-height:0; }
+  canvas { width:100%; height:100%; display:block; }
+  #desc { position:absolute; left:12px; bottom:12px; max-width:560px;
+    background:rgba(8,10,16,.78); border:1px solid #1b1f2e; border-radius:6px;
+    padding:9px 12px; color:var(--ink); backdrop-filter:blur(3px); }
+  #desc b { color:var(--hot); }
+  #desc small { color:var(--dim); }
+  #err { position:absolute; inset:0; padding:24px; overflow:auto; display:none;
+    background:rgba(20,2,8,.95); color:#ff9bb0; white-space:pre-wrap; }
+  kbd { background:#1b1f2e; border-radius:3px; padding:0 5px; color:var(--ink); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>floating_point_dementia</h1>
+    <select id="pick" title="shader"></select>
+    <button id="reset" title="restart time">↺ time</button>
+    <button id="pause">⏸ pause</button>
+    <span class="spacer"></span>
+    <span id="meta">drag the canvas to feed iMouse</span>
+  </header>
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <div id="desc"></div>
+    <div id="err"></div>
+  </div>
+</div>
+
+<script>
+// ---- the shader catalog ----------------------------------------------------
+const SHADERS = [
+  { name:"phenomena / precision_tearing", path:"shaders/phenomena/precision_tearing.frag",
+    desc:"A clean grid pushed into the precision desert until x+1==x and it dissolves into mantissa hash. <small>mouse X = distance</small>" },
+  { name:"phenomena / z_fight_cosmic", path:"shaders/phenomena/z_fight_cosmic.frag",
+    desc:"Two near-parallel planes whose quantized depths collide at cosmic scale and fight. <small>mouse X = camera distance</small>" },
+  { name:"phenomena / denormal_fog", path:"shaders/phenomena/denormal_fog.frag",
+    desc:"Descent below the smallest normal float; structure drowns in the gray fog of gradual underflow. <small>mouse Y = depth</small>" },
+  { name:"phenomena / nan_corruption", path:"shaders/phenomena/nan_corruption.frag",
+    desc:"A single 0/0 is born and the purple infection crawls out to eat the frame. <small>click to move the seed</small>" },
+  { name:"phenomena / catastrophic_cancellation", path:"shaders/phenomena/catastrophic_cancellation.frag",
+    desc:"Subtracting nearly-equal large numbers: the answer is built from noise. cyan = exact, orange = what the FPU gets. <small>mouse X = magnitude</small>" },
+  { name:"phenomena / mandelbrot_dementia", path:"shaders/phenomena/mandelbrot_dementia.frag",
+    desc:"Deep zoom until binary32 runs out of mantissa and the fractal shatters into ULP blocks. <small>mouse X = zoom</small>" },
+  { name:"demo / journey_to_inf", path:"shaders/demo/journey_to_inf.frag",
+    desc:"A guided ride from 1.0 through every zone and out the far side into +Inf. <small>mouse X = scrub</small>" },
+  { name:"demo / math_breakdown", path:"shaders/demo/math_breakdown.frag",
+    desc:"Six operations on a grid, glowing green while exact and bleeding red as they diverge. <small>mouse X = magnitude</small>" },
+  { name:"demo / bit_reveal", path:"shaders/demo/bit_reveal.frag",
+    desc:"Raw IEEE-754: sign (red) · exponent (green) · mantissa (blue), churning as the value climbs. <small>mouse X = value</small>" },
+];
+
+// ---- #include preprocessor (with guards) -----------------------------------
+function dirname(p){ return p.slice(0, p.lastIndexOf("/") + 1); }
+function normalize(p){
+  const out = [];
+  for (const s of p.split("/")) {
+    if (s === ".." ) out.pop();
+    else if (s !== "." && s !== "") out.push(s);
+  }
+  return out.join("/");
+}
+async function fetchText(path){
+  const r = await fetch(path, { cache:"no-cache" });
+  if (!r.ok) throw new Error(`fetch failed (${r.status}) for ${path}\n` +
+    `Are you serving over http? Try: python3 -m http.server 8080`);
+  return r.text();
+}
+async function resolveIncludes(path, included){
+  path = normalize(path);
+  if (included.has(path)) return "";        // include guard
+  included.add(path);
+  const src = await fetchText(path);
+  const dir = dirname(path);
+  const lines = src.split("\n");
+  const out = [];
+  for (const line of lines){
+    const m = line.match(/^[ \t]*#include\s+"([^"]+)"/);
+    if (m) out.push(await resolveIncludes(normalize(dir + m[1]), included));
+    else   out.push(line);
+  }
+  return out.join("\n");
+}
+
+// ---- WebGL2 plumbing -------------------------------------------------------
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias:false, preserveDrawingBuffer:false });
+const errBox = document.getElementById("err");
+if (!gl) showError("WebGL2 is not available in this browser.");
+
+const VERT = `#version 300 es
+in vec2 aPos;
+void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const PRELUDE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform vec3  iResolution;
+uniform float iTime;
+uniform int   iFrame;
+uniform vec4  iMouse;
+uniform float iZero;     // always 0.0 — un-foldable source of NaN/Inf
+out vec4 fpd_fragColor;
+`;
+const EPILOGUE = `
+void main(){ mainImage(fpd_fragColor, gl_FragCoord.xy); }`;
+
+let program = null, uniforms = {}, startTime = performance.now(), frame = 0;
+let paused = false;
+const mouse = { x:0, y:0, down:0 };
+
+// full-screen triangle
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+
+function compile(type, src){
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){
+    const log = gl.getShaderInfoLog(sh);
+    gl.deleteShader(sh);
+    throw { log, src };
+  }
+  return sh;
+}
+
+function buildProgram(fragBody){
+  const fragSrc = PRELUDE + "\n" + fragBody + "\n" + EPILOGUE;
+  let vs, fs;
+  try {
+    vs = compile(gl.VERTEX_SHADER, VERT);
+    fs = compile(gl.FRAGMENT_SHADER, fragSrc);
+  } catch (e){
+    // annotate the error with line numbers from the assembled source
+    const numbered = (e.src || fragSrc).split("\n")
+      .map((l,i)=>String(i+1).padStart(4," ")+"  "+l).join("\n");
+    throw new Error("shader compile error:\n" + (e.log||e) + "\n\n----- source -----\n" + numbered);
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+  gl.bindAttribLocation(prog, 0, "aPos");
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+    throw new Error("link error:\n" + gl.getProgramInfoLog(prog));
+  gl.deleteShader(vs); gl.deleteShader(fs);
+  return prog;
+}
+
+async function load(path){
+  hideError();
+  try {
+    const body = await resolveIncludes(path, new Set());
+    const prog = buildProgram(body);
+    if (program) gl.deleteProgram(program);
+    program = prog;
+    uniforms = {
+      iResolution: gl.getUniformLocation(program, "iResolution"),
+      iTime:       gl.getUniformLocation(program, "iTime"),
+      iFrame:      gl.getUniformLocation(program, "iFrame"),
+      iMouse:      gl.getUniformLocation(program, "iMouse"),
+      iZero:       gl.getUniformLocation(program, "iZero"),
+    };
+    startTime = performance.now();
+    frame = 0;
+  } catch (e){
+    showError(String(e.message || e));
+  }
+}
+
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.floor(canvas.clientWidth  * dpr);
+  const h = Math.floor(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; }
+}
+
+function render(){
+  resize();
+  if (program){
+    const t = paused ? pausedAt : (performance.now() - startTime) / 1000;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(program);
+    gl.bindVertexArray(vao);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform3f(uniforms.iResolution, canvas.width, canvas.height, 1.0);
+    gl.uniform1f(uniforms.iTime, t);
+    gl.uniform1i(uniforms.iFrame, frame++);
+    gl.uniform4f(uniforms.iMouse, mouse.x, mouse.y, mouse.down, 0.0);
+    gl.uniform1f(uniforms.iZero, 0.0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  requestAnimationFrame(render);
+}
+
+// ---- error UI --------------------------------------------------------------
+function showError(msg){ errBox.textContent = msg; errBox.style.display = "block"; }
+function hideError(){ errBox.style.display = "none"; }
+
+// ---- input -----------------------------------------------------------------
+function setMouse(e){
+  const r = canvas.getBoundingClientRect();
+  const dpr = canvas.width / r.width;
+  mouse.x = (e.clientX - r.left) * dpr;
+  mouse.y = (r.height - (e.clientY - r.top)) * dpr; // flip to GL bottom-left
+}
+canvas.addEventListener("mousedown", e=>{ mouse.down = 1; setMouse(e); });
+window.addEventListener("mouseup",   ()=>{ mouse.down = 0; });
+window.addEventListener("mousemove", e=>{ if (mouse.down) setMouse(e); });
+canvas.addEventListener("touchstart", e=>{ mouse.down=1; setMouse(e.touches[0]); e.preventDefault(); }, {passive:false});
+canvas.addEventListener("touchmove",  e=>{ setMouse(e.touches[0]); e.preventDefault(); }, {passive:false});
+window.addEventListener("touchend",   ()=>{ mouse.down=0; });
+
+// ---- controls --------------------------------------------------------------
+const pick = document.getElementById("pick");
+const desc = document.getElementById("desc");
+SHADERS.forEach((s,i)=>{
+  const o = document.createElement("option"); o.value = i; o.textContent = s.name; pick.appendChild(o);
+});
+function selectShader(i){
+  const s = SHADERS[i];
+  desc.innerHTML = "<b>"+s.name+"</b><br>"+s.desc;
+  load(s.path);
+}
+pick.addEventListener("change", ()=> selectShader(+pick.value));
+document.getElementById("reset").addEventListener("click", ()=>{ startTime = performance.now(); frame = 0; });
+let pausedAt = 0;
+document.getElementById("pause").addEventListener("click", (e)=>{
+  paused = !paused;
+  if (paused){ pausedAt = (performance.now()-startTime)/1000; e.target.textContent = "▶ resume"; }
+  else { startTime = performance.now() - pausedAt*1000; e.target.textContent = "⏸ pause"; }
+});
+
+selectShader(0);
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
