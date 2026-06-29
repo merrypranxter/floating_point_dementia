@@ -1,0 +1,18 @@
+# bundler output / scratch
+*.bundle.glsl
+out.glsl
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node
+node_modules/
+
+# editor / os
+.DS_Store
+.vscode/
+.idea/
+*.swp
