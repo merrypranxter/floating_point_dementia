@@ -44,7 +44,11 @@ float quantizeFloat(float x, float mantissaBits) {
     // Same denormal-floor clamp as ulp(): below FP32_MIN_NORMAL an unclamped step
     // underflows to 0.0, making x/step Infinity and the result NaN.
     float e = max(-126.0, floor(log2(x)));
-    float step = exp2(e - mantissaBits);
+    // Clamp the step's exponent into the representable single-precision range.
+    // mantissaBits goes deeply negative at extreme magnitudes (precisionBitsAt),
+    // so e - mantissaBits can overflow exp2 to Infinity -> x/step = 0 ->
+    // 0 * Infinity = NaN. [-149, 127] caps both the under- and overflow.
+    float step = exp2(clamp(e - mantissaBits, -149.0, 127.0));
     // round-to-nearest, the IEEE default rounding mode
     return s * floor(x / step + 0.5) * step;
 }
