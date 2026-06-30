@@ -32,6 +32,8 @@ def ulp(x: float) -> float:
     b = bits_of(x) & 0x7FFFFFFF
     if b >= 0x7F800000:
         return float("nan")
+    if b == 0x7F7FFFFF:  # FP32_MAX: b+1 would be +Inf, so report the prior step
+        b = 0x7F7FFFFE
     nxt = struct.unpack(">f", struct.pack(">I", b + 1))[0]
     cur = struct.unpack(">f", struct.pack(">I", b))[0]
     return nxt - cur

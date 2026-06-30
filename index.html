@@ -151,24 +151,30 @@ function compile(type, src){
 
 function buildProgram(fragBody){
   const fragSrc = PRELUDE + "\n" + fragBody + "\n" + EPILOGUE;
-  let vs, fs;
+  // Track every GL object so we can delete partial work on any failure path
+  // (a fragment compile error otherwise leaks the vertex shader; a link error
+  // leaks both shaders and the program).
+  let vs = null, fs = null, prog = null;
   try {
     vs = compile(gl.VERTEX_SHADER, VERT);
     fs = compile(gl.FRAGMENT_SHADER, fragSrc);
+    prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+    gl.bindAttribLocation(prog, 0, "aPos");
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+      throw new Error("link error:\n" + gl.getProgramInfoLog(prog));
+    gl.deleteShader(vs); gl.deleteShader(fs);
+    return prog;
   } catch (e){
+    if (prog) gl.deleteProgram(prog);
+    if (vs) gl.deleteShader(vs);
+    if (fs) gl.deleteShader(fs);
     // annotate the error with line numbers from the assembled source
     const numbered = (e.src || fragSrc).split("\n")
       .map((l,i)=>String(i+1).padStart(4," ")+"  "+l).join("\n");
-    throw new Error("shader compile error:\n" + (e.log||e) + "\n\n----- source -----\n" + numbered);
+    throw new Error("shader compile error:\n" + (e.log||e.message||e) + "\n\n----- source -----\n" + numbered);
   }
-  const prog = gl.createProgram();
-  gl.attachShader(prog, vs); gl.attachShader(prog, fs);
-  gl.bindAttribLocation(prog, 0, "aPos");
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
-    throw new Error("link error:\n" + gl.getProgramInfoLog(prog));
-  gl.deleteShader(vs); gl.deleteShader(fs);
-  return prog;
 }
 
 async function load(path){

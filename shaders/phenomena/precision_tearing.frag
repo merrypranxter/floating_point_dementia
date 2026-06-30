@@ -41,8 +41,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float bits = precisionBitsAt(distance);
 
     // Quantize the *coordinates* to the surviving grid — this is the tearing.
-    // (named gridStep, not step — `step` is a GLSL builtin we use below.)
-    float gridStep = exp2(floor(log2(distance)) - bits);
+    // The grid spacing IS the ULP at this magnitude (linear in distance). An
+    // earlier hand-rolled exp2(floor(log2(distance)) - bits) was quadratic in
+    // distance, which blew the step past the scene size almost immediately and
+    // left a flat dead zone. (named gridStep, not step — `step` is a builtin.)
+    float gridStep = ulp(distance);
     vec2 pq = floor(p / max(gridStep, 1e-20) + 0.5) * gridStep;
 
     vec3 color = cleanScene(pq - distance, iTime); // re-center for the scene
